@@ -10,7 +10,8 @@
     "avg_latency_ms": 145.0,
     "support_tickets_30d": 0,
     "discount_pct": 10.0,
-    "payment_failures_90d": 0
+    "payment_failures_90d": 0,
+    "downtime_hours_30d" : 2.12
   },
   {
     "plan_type": "Basic",
@@ -23,6 +24,7 @@
     "avg_latency_ms": 210.0,
     "support_tickets_30d": 3,
     "discount_pct": 0.0,
-    "payment_failures_90d": 2
+    "payment_failures_90d": 2,
+    "downtime_hours_30d" : 1.43
   }
 ]

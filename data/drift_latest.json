@@ -2,16 +2,17 @@
   "overall_drift": true,
   "threshold": 0.2,
   "features": {
-    "avg_latency_ms": 0.33,
-    "support_tickets_30d": 0.28,
-    "discount_pct": 0.21,
-    "contract_type": 0.19,
-    "autopay": 0.18,
-    "plan_type": 0.12,
-    "monthly_usage_gb": 0.11,
-    "tenure_months": 0.09,
-    "add_on_count": 0.05,
-    "payment_failures_90d": 0.1,
-    "downtime_hours_30d": 0.29
+    "plan_type": 0.0,
+    "contract_type": 0.01,
+    "autopay": 0.11,
+    "is_promo_user": 0.0,
+    "add_on_count": 0.01,
+    "tenure_months": 0.02,
+    "monthly_usage_gb": 0.01,
+    "avg_latency_ms": 0.32,
+    "support_tickets_30d": 0.12,
+    "discount_pct": 0.12,
+    "payment_failures_90d": 0.0,
+    "downtime_hours_30d": 0.3
   }
 }
