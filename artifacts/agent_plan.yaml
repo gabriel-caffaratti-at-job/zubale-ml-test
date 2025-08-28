@@ -1,0 +1,9 @@
+status: critical
+findings:
+  - drift_overall: true
+  - pr_auc_drop_pct: 0.5
+actions:
+  - open_incident
+  - trigger_retraining
+rationale: >
+  Overall data drift is detected, and the PR-AUC has dropped by 0.5% against the 7-day median.  This is a critical situation as the overall data drift is true, and a drop in PR-AUC exceeds the threshold.  Opening an incident and triggering retraining are necessary actions.

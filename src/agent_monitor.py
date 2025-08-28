@@ -3,7 +3,7 @@
 #   uv run python -m src.agent_monitor \
 #     --metrics data/metrics_history.jsonl \
 #     --drift data/drift_latest.json \
-#     --out artifacts/agent_plan.yaml 
+#     --out artifacts/agent_plan.yaml
 
 import argparse
 import json
@@ -18,7 +18,7 @@ from langgraph.graph import StateGraph, END
 
 # Vertex AI (Gemini on Vertex)
 from vertexai import init as vertexai_init
-from vertexai.generative_models import GenerativeModel
+from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 
 # -------------------------- Utilities --------------------------
@@ -74,14 +74,12 @@ def _init_vertex(project: Optional[str], location: Optional[str], default_region
 
 # ---------------- Structured output helpers ----------------
 
-def _gen_json(model: GenerativeModel, prompt: str, schema: Optional[dict] = None) -> dict:
+def _gen_json(model: GenerativeModel, prompt: str) -> dict:
     """
-    Ask Vertex Gemini to return strict JSON (no markdown fences).
-    If available, pass response_schema to enforce shape (newer SDKs).
+    Ask Vertex Gemini to return strict JSON (no markdown fences) by MIME type.
+    NOTE: We intentionally DO NOT pass response_schema due to SDK enum/type issues.
     """
-    gen_cfg = {"response_mime_type": "application/json"}
-    if schema:
-        gen_cfg["response_schema"] = schema  # if unsupported by SDK, it may be ignored/raise
+    gen_cfg = GenerationConfig(response_mime_type="application/json")
     resp = model.generate_content(prompt, generation_config=gen_cfg)
 
     text = getattr(resp, "text", None)
@@ -92,79 +90,81 @@ def _gen_json(model: GenerativeModel, prompt: str, schema: Optional[dict] = None
     try:
         return json.loads(s)
     except Exception as e:
-        raise RuntimeError(f"Model did not return valid JSON.\n---RAW---\n{s}") from e
+        # Helpful during iteration; won’t break CI if stderr is ignored
+        print("DEBUG: RAW_JSON_FROM_MODEL:\n", s, file=sys.stderr)
+        raise RuntimeError("Model did not return valid JSON.") from e
 
 
-# JSON Schemas for sub-agents
-METRICS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "roc_auc_median_7d": {"type": "number"},
-        "pr_auc_median_7d": {"type": "number"},
-        "roc_auc_latest": {"type": "number"},
-        "pr_auc_latest": {"type": "number"},
-        "roc_auc_drop_pct": {"type": "number"},
-        "pr_auc_drop_pct": {"type": "number"},
-        "latency_recent_two_over_400": {"type": "boolean"},
-        "latest_latency_p95_ms": {"type": ["integer", "null"]},
-    },
-    "required": [
-        "roc_auc_median_7d", "pr_auc_median_7d",
-        "roc_auc_latest", "pr_auc_latest",
-        "roc_auc_drop_pct", "pr_auc_drop_pct",
-        "latency_recent_two_over_400", "latest_latency_p95_ms"
-    ],
-    "additionalProperties": False,
-}
+def _normalize_decision(decision: Dict[str, Any], drift_overall: bool) -> Dict[str, Any]:
+    """
+    Coerce model output to required shape:
+    - findings: list of 1-key dicts, always includes drift_overall once
+    - actions: list of strings
+    - status: in {"healthy","warn","critical"}
+    - rationale: string
+    """
+    d = dict(decision or {})
 
-DRIFT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "overall_drift": {"type": "boolean"},
-        "top_features": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "psi": {"type": "number"},
-                },
-                "required": ["name", "psi"],
-                "additionalProperties": False,
-            },
-            "maxItems": 5
-        },
-    },
-    "required": ["overall_drift", "top_features"],
-    "additionalProperties": False,
-}
+    # findings -> list[dict[str, Any]]
+    f = d.get("findings", [])
+    if f is None:
+        f = []
+    elif isinstance(f, dict):
+        # Convert {"a":1,"b":2} -> [{"a":1},{"b":2}]
+        f = [{k: v} for k, v in f.items()]
+    elif not isinstance(f, list):
+        f = [f]
 
-DECISION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "status": {"type": "string", "enum": ["healthy", "warn", "critical"]},
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "minProperties": 1,
-                "maxProperties": 1,
-                "additionalProperties": {"type": ["number", "boolean", "integer"]}
-            }
-        },
-        "actions": {
-            "type": "array",
-            "items": {"type": "string", "enum": [
-                "open_incident", "trigger_retraining", "roll_back_model",
-                "raise_thresholds", "page_oncall=false", "do_nothing"
-            ]},
-            "minItems": 1
-        },
-        "rationale": {"type": "string"},
-    },
-    "required": ["status", "findings", "actions", "rationale"],
-    "additionalProperties": False,
-}
+    fixed: List[Dict[str, Any]] = []
+    for item in f:
+        if isinstance(item, dict) and len(item) == 1:
+            fixed.append(item)
+        elif isinstance(item, dict) and len(item) > 1:
+            # Split multi-key dicts
+            fixed.extend([{k: v} for k, v in item.items()])
+        else:
+            # Skip non-dict junk
+            continue
+
+    # Ensure drift_overall is present exactly once and boolean-typed
+    saw = False
+    for i, item in enumerate(fixed):
+        if "drift_overall" in item:
+            fixed[i] = {"drift_overall": bool(item["drift_overall"])}
+            saw = True
+            break
+    if not saw:
+        fixed.insert(0, {"drift_overall": bool(drift_overall)})
+
+    # actions -> list[str]
+    actions = d.get("actions", [])
+    if actions is None:
+        actions = []
+    elif isinstance(actions, str):
+        actions = [actions]
+    elif not isinstance(actions, list):
+        actions = [str(actions)]
+    actions = [str(a) for a in actions if a]
+
+    # status -> allowed set
+    status = (d.get("status") or "").strip().lower()
+    if status not in ("healthy", "warn", "critical"):
+        status = "healthy"
+
+    # rationale -> string
+    rationale = str(d.get("rationale") or "").strip()
+
+    # Fallback action defaults
+    if not actions:
+        actions = ["do_nothing"] if status == "healthy" else ["page_oncall=false"]
+
+    return {
+        "status": status,
+        "findings": fixed,
+        "actions": actions,
+        "rationale": rationale or "No rationale provided by the model; applied defaults.",
+    }
+
 
 
 # -------------------------- Agent State --------------------------
@@ -221,39 +221,51 @@ def metrics_analyst(state: AgentState) -> AgentState:
             - latency_recent_two_over_400: true iff last TWO latency_p95_ms > 400
             - latest_latency_p95_ms: latest latency value (integer), or null if not present
 
-            Return STRICT JSON exactly matching the provided schema.
+            Return STRICT JSON ONLY with keys exactly:
+            {{
+            "roc_auc_median_7d": <number>,
+            "pr_auc_median_7d": <number>,
+            "roc_auc_latest": <number>,
+            "pr_auc_latest": <number>,
+            "roc_auc_drop_pct": <number>,
+            "pr_auc_drop_pct": <number>,
+            "latency_recent_two_over_400": <true|false>,
+            "latest_latency_p95_ms": <integer|null>
+            }}
 
             METRICS (JSON array):
             {metrics_block}
             """.strip()
 
-    state.metrics_summary = _gen_json(model, prompt, METRICS_SCHEMA)
+    state.metrics_summary = _gen_json(model, prompt)
     return state
 
 
 def drift_analyst(state: AgentState) -> AgentState:
     """
-        LLM sub-agent: summarize drift (overall flag + top features by PSI).
+    LLM sub-agent: summarize drift (overall flag + top features by PSI).
     """
     _init_vertex(state.project, state.location)
     model = GenerativeModel(state.model_name)
     drift_block = json.dumps(state.drift, indent=2)
 
     prompt = f"""
-        You are a drift analysis agent. Input is a drift report JSON.
+            You are a drift analysis agent. Input is a drift report JSON.
 
-        Produce strict JSON:
-        - overall_drift: copy boolean from input.
-        - top_features: up to 5 items with largest PSI values (descending).
-        Each item is {{"name": <string>, "psi": <number rounded to two decimals>}}.
+            Produce STRICT JSON ONLY:
+            {{
+            "overall_drift": <true|false>,
+            "top_features": [ {{"name": <string>, "psi": <number>}}, ... up to 5, descending by psi ]
+            }}
 
-        Return STRICT JSON exactly matching the provided schema.
+            - overall_drift: copy boolean from input if present; otherwise infer.
+            - top_features: pick up to 5 with largest PSI values; round to two decimals.
 
-        DRIFT REPORT:
-        {drift_block}
-        """.strip()
+            DRIFT REPORT:
+            {drift_block}
+            """.strip()
 
-    state.drift_summary = _gen_json(model, prompt, DRIFT_SCHEMA)
+    state.drift_summary = _gen_json(model, prompt)
     return state
 
 
@@ -269,33 +281,43 @@ def decision_maker(state: AgentState) -> AgentState:
     drift_json = json.dumps(state.drift_summary, indent=2)
 
     prompt = f"""
-            You are a decision agent. Apply these heuristics:
+                You are a decision agent. Apply these heuristics:
 
-            - warn if ROC-AUC drops ≥ 3% vs 7-day median OR p95 latency > 400ms for 2 consecutive points.
-            - critical if ROC-AUC drops ≥ 6% OR (overall_drift == true AND PR-AUC down ≥ 5% vs 7-day median).
-            - healthy otherwise.
+                - warn if ROC-AUC drops ≥ 3% vs 7-day median OR p95 latency > 400ms for 2 consecutive points.
+                - critical if ROC-AUC drops ≥ 6% OR (overall_drift == true AND PR-AUC down ≥ 5% vs 7-day median).
+                - healthy otherwise.
 
-            Allowed actions: ["open_incident","trigger_retraining","roll_back_model","raise_thresholds","page_oncall=false","do_nothing"].
+                Allowed actions: ["open_incident","trigger_retraining","roll_back_model","raise_thresholds","page_oncall=false","do_nothing"].
 
-            INPUT METRICS_SUMMARY:
-            {metrics_json}
+                INPUT METRICS_SUMMARY:
+                {metrics_json}
 
-            INPUT DRIFT_SUMMARY:
-            {drift_json}
+                INPUT DRIFT_SUMMARY:
+                {drift_json}
 
-            Return STRICT JSON with keys: status, findings, actions, rationale, matching the schema.
-            Rules:
-            - findings includes ONLY triggered numeric signals plus drift_overall (always).
-            * Include {{"roc_auc_drop_pct": <one decimal>}} ONLY if relevant.
-            * Include {{"latency_p95_ms": <integer>}} ONLY if two most recent p95 > 400ms.
-            * ALWAYS include {{"drift_overall": <true|false>}}.
-            - actions consistent with status.
-            - rationale: 2–4 sentences.
+                Return STRICT JSON ONLY with keys: status, findings, actions, rationale.
+                Rules:
+                - findings MUST be an ARRAY (use [] if none).
+                - findings includes ONLY triggered numeric signals plus drift_overall (always).
+                * Include {{"roc_auc_drop_pct": <one decimal>}} ONLY if relevant.
+                * Include {{"latency_p95_ms": <integer>}} ONLY if two most recent p95 > 400ms.
+                * ALWAYS include {{"drift_overall": <true|false>}}.
+                - actions must be an ARRAY of allowed strings and consistent with status.
+                - rationale: 2–4 sentences.
 
-            Return JSON only.
-            """.strip()
+                Valid example (shape only):
+                {{
+                "status": "warn",
+                "findings": [{{"drift_overall": true}}, {{"roc_auc_drop_pct": 4.3}}],
+                "actions": ["trigger_retraining","page_oncall=false"],
+                "rationale": "..."
+                }}
+                """.strip()
 
-    state.decision_json = _gen_json(model, prompt, DECISION_SCHEMA)
+    raw = _gen_json(model, prompt)
+    state.decision_json = _normalize_decision(
+        raw, drift_overall=bool(state.drift_summary.get("overall_drift", False))
+    )
 
     # Minimal local checks
     if state.decision_json["status"] not in ("healthy", "warn", "critical"):

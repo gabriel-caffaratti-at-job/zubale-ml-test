@@ -55,3 +55,8 @@ uv run pytest -q
 # FastAPI via uvicorn
 uv run python -m uvicorn src.app:app --port 8000
 ```
+
+### 2.4 Agent (local API)
+```bash
+uv run python -m src.agent_monitor --metrics data/metrics_history.jsonl --drift data/drift_latest.json --out artifacts/agent_plan.yaml
+```
