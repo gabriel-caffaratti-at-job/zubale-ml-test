@@ -1,0 +1,19 @@
+[project]
+name = "zubale-ml-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.116.1",
+    "httpx>=0.28.1",
+    "keras>=3.11.3",
+    "langchain-google-vertexai>=1.0.8",
+    "langgraph>=0.4.5",
+    "pandas>=2.3.2",
+    "pytest>=8.4.1",
+    "scikit-learn>=1.7.1",
+    "tensorflow>=2.20.0",
+    "uvicorn>=0.35.0",
+    "vertexai>=1.71.1",
+]
