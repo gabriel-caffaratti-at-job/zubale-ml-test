@@ -1,6 +1,5 @@
 # Mini-Prod ML Challenge (Starter)
 
-
 # UV Quickstart — Install & Run (train / drift / test / serve)
 
 This short guide shows how to **install [uv]** and how to use it to run your project’s common workflows: **train**, **drift**, **test**, and **serve**.
